@@ -1,12 +1,18 @@
+"""
+leaving prints for this module; can be beneficial for stdin redirect in either windows powershell's or
+Linux bash's '1>>', meanwhile the unittest specific output can be captured to another file with the usage of
+stderr redirect '2>>' in another place, to another file, while invoking test running scripts from terminal
+"""
+import sys
 import unittest
 from random import choice, randint, shuffle
 from re import match, findall, search
 from ast import literal_eval
 from copy import deepcopy
 from os import remove
-from pprint import pprint
+from io import StringIO
 
-from main import Card, Player, Game
+from main import Card, Player, Game, GameError
 
 
 class CardTest(unittest.TestCase):
@@ -20,15 +26,14 @@ class CardTest(unittest.TestCase):
 
     def test_init(self):
         color_codes = ['r', 'd', 'o', 'e', 's', 'x']
-        wrong_color = chr(randint(35, 98))
         rand_card = choice(self.all_cards)
         rand_cost = [randint(0, 2)] * 5
         improper_cost = [randint(0, 2)] * randint(1, 3)
         rand_value = randint(0, 5)
         rand_level = randint(1, 3)
         try:
-            card = Card(format_list=rand_card)
-            card2 = Card(
+            _ = Card(format_list=rand_card)
+            __ = Card(
                 gem=rand_card[0],
                 cost=rand_card[4:],
                 level=rand_card[3],
@@ -113,7 +118,8 @@ class PlayerTest(unittest.TestCase):
         self.player_instance = Player(p_id=self.pid)
         self.player_instance.cards = self.chosen_cards
 
-    def card_power_function(self, cards):
+    @staticmethod
+    def card_power_function(cards):
         rubies, diamonds, onyxes, emeralds, saphires, wildcards = [0] * 6
         for card in cards:
             if card.gem == "o":
@@ -128,7 +134,8 @@ class PlayerTest(unittest.TestCase):
                 saphires += 1
         return [rubies, diamonds, onyxes, emeralds, saphires, wildcards]
 
-    def power_to_cost_difference(self, test_card, power):
+    @staticmethod
+    def power_to_cost_difference(test_card, power):
         IDS = test_card.COLOR_IDS
         rubies_missing = power[IDS['r'][1]] - test_card.cost[IDS['r'][1]]
         diamonds_missing = power[IDS['d'][1]] - test_card.cost[IDS['d'][1]]
@@ -194,7 +201,7 @@ class PlayerTest(unittest.TestCase):
         c_codes = Card.COLOR_CODES
         IDS = Card.COLOR_IDS
         ch_c = choice(c_codes)
-        self.assertRaises(ValueError, self.player_instance.pay_token, color=IDS[ch_c][1])
+        self.assertRaises(GameError, self.player_instance.pay_token, color=IDS[ch_c][1])
         self.assertEqual(0, self.player_instance.tokens[IDS[ch_c][1]])
         self.player_instance.get_token(IDS[ch_c][1])
         self.player_instance.get_token(IDS[ch_c][1])
@@ -203,7 +210,7 @@ class PlayerTest(unittest.TestCase):
         self.assertEqual(1, self.player_instance.tokens[IDS[ch_c][1]])
 
     def test_pay_tokens(self):
-        # we have to first generate a card that we can always buy
+        # we have to first generate a card that we can buy
         original_tokens = [randint(1, 3) for _ in range(6)]
         self.player_instance.tokens = original_tokens
         card = Card(choice(self.all_cards))
@@ -225,7 +232,7 @@ class PlayerTest(unittest.TestCase):
             if token_debt < 0:
                 debt -= token_debt
         # # nullifying negative terms that were used in previous step, and adding the 'wildcards' to the list
-        to_pay = [cost if cost<tokens else tokens for cost, tokens in zip(to_pay, original_tokens)] + [debt]
+        to_pay = [cost if cost < tokens else tokens for cost, tokens in zip(to_pay, original_tokens)] + [debt]
         original_tokens = [o - tp for o, tp in zip(original_tokens, to_pay)]
         tokens_paid = self.player_instance.pay_tokens(cmp, card)
         self.assertEqual(to_pay, tokens_paid)
@@ -261,6 +268,42 @@ class PlayerTest(unittest.TestCase):
                 else:
                     print("DID NOT BUY - OK")
 
+    def test_reserve(self):
+        self.assertEqual([], self.player_instance.reserved)
+        test_card = self.chosen_cards[0]
+        self.player_instance.reserve(test_card)
+        self.assertIn(test_card, self.player_instance.reserved)
+        self.player_instance.reserve(test_card)
+        self.player_instance.reserve(test_card)
+        self.assertRaises(GameError, self.player_instance.reserve, card=test_card)
+
+    def test_buy_reserve(self):
+        original_tokens = [5 for _ in range(6)]
+        self.player_instance.tokens = original_tokens
+        card = Card(choice(self.all_cards))
+        while not (cmp := self.player_instance.can_buy(card))[0]:
+            card = Card(choice(self.all_cards))
+        self.player_instance.reserve(card)
+        self.player_instance.buy_reserve(tuple([0, 4]))
+        self.assertIn(card, self.player_instance.cards)
+        self.assertEqual([], self.player_instance.reserved)
+
+    def test_provide_position(self):
+        orig_stdin = sys.stdin
+        sys.stdin = StringIO(" \n ")
+        self.assertRaises(EOFError, self.player_instance.provide_position)
+        sys.stdin = orig_stdin
+        a = randint(0, 3)
+        b = randint(0, 2)
+        print()  # printing to flush stdin stream and prepare it for another test
+        orig_stdin = sys.stdin
+        sys.stdin = StringIO(f"{a}\n{b}")
+        r, c = self.player_instance.provide_position()
+        sys.stdin = orig_stdin
+        print()
+        self.assertEqual(a, r)
+        self.assertEqual(b, c)
+
 
 class GameTest(unittest.TestCase):
     def setUp(self):
@@ -282,8 +325,8 @@ class GameTest(unittest.TestCase):
     def test_init(self):
         improper_players = randint(-10707, 1)
         improper_players2 = randint(5, 123097)
-        self.assertRaises(ValueError, Game, player_count=improper_players)
-        self.assertRaises(ValueError, Game, player_count=improper_players2)
+        self.assertRaises(GameError, Game, player_count=improper_players)
+        self.assertRaises(GameError, Game, player_count=improper_players2)
         try:
             Game(player_count=randint(2, 4))
         except ValueError as e:
@@ -326,7 +369,7 @@ class GameTest(unittest.TestCase):
         test_game = Game(randint(2, 4))
         # can't generate tokens out of thin air
         test_game.tokens = [0 for _ in range(6)]
-        self.assertRaises(ValueError, test_game.give_token, color=color_id, p_id=player_id)
+        self.assertRaises(GameError, test_game.give_token, color=color_id, p_id=player_id)
 
     def test_card_reading(self):
         testgame = Game(randint(2, 4))
@@ -378,7 +421,7 @@ class GameTest(unittest.TestCase):
                              [ci.level for ci in self.game_instance.open_cards[index]])
 
     def test_full_setup(self):
-        test_game = Game(player_num:=randint(2, 4))
+        test_game = Game(player_num := randint(2, 4))
         test_game.full_setup()
         self.assertEqual(player_num, len(test_game.players))
         self.assertEqual(6, len(test_game.tokens))
@@ -386,12 +429,102 @@ class GameTest(unittest.TestCase):
             self.assertEqual(4, len(test_game.open_cards[i]))
         self.assertEqual(player_num+1, len(test_game.open_cards[-1]))
 
-    def test_player_draw_2(self):
-        pass
+    def test_card_sizes(self):
+        starting_values = [36, 26, 16]
+        pops = [randint(0, 14), randint(0, 7), randint(0, 5)]
+        self.assertEqual(starting_values, self.game_instance.deck_sizes)
+        poped_vals = [sv - pv for sv, pv in zip(starting_values, pops)]
+        for _ in range(pops[0]):
+            self.game_instance.l1_deck.pop()
+        for _ in range(pops[1]):
+            self.game_instance.l2_deck.pop()
+        for _ in range(pops[2]):
+            self.game_instance.l3_deck.pop()
+        self.assertEqual(poped_vals, self.game_instance.deck_sizes)
+
+    def test_player_draw_3(self):
+        c = [0, 1, 2, 3, 4]
+        self.assertRaises(GameError, self.game_instance.player_draw_3, colors=c, p_id=0)
+        self.assertRaises(GameError, self.game_instance.player_draw_3, colors=[], p_id=0)
+        chosen = []
+        print(chosen)
+        for _ in range(3):
+            chosen += [choice(c)]
+            c.remove(chosen[-1])
+        print(c, chosen)
+        chosen2 = chosen[:2]
+        print(chosen2, self.game_instance.players[0].tokens)
+        before = deepcopy(self.game_instance.players[0].tokens)
+        # drawing 3 from 3 colors
+        self.game_instance.player_draw_3(chosen, 0)
+        after = deepcopy(before)
+        for c in chosen:
+            after[c] += 1
+        self.assertNotEqual(before, self.game_instance.players[0].tokens)
+        self.assertEqual(after, self.game_instance.players[0].tokens)
+        before = deepcopy(after)
+        for c in chosen2:
+            after[c] += 1
+        # drawing 3 with 2 color choice
+        self.game_instance.player_draw_3(chosen2, 0)
+        self.assertNotEqual(before, self.game_instance.players[0].tokens)
+        self.assertEqual(after, self.game_instance.players[0].tokens)
+        self.assertEqual(after, self.game_instance.players[0].tokens)
+        # try throwing exception when no tokens on stack for one of the colors, after reset
+        self.game_instance.full_setup()
+        self.game_instance.tokens[chosen[0]] = 0
+        self.assertRaises(GameError, self.game_instance.player_draw_3, colors=chosen, p_id=0)
+
+    def test_player_draw_2_same(self):
+        c = [0, 1, 2, 3, 4]
+        chosen = choice(c)
+        before = deepcopy(self.game_instance.players[0].tokens)
+        self.game_instance.player_draw_2_same(chosen, p_id=0)
+        after = deepcopy(before)
+        after[chosen] += 2
+        self.assertNotEqual(before, self.game_instance.players[0].tokens)
+        self.assertEqual(after, self.game_instance.players[0].tokens)
+        self.game_instance.full_setup()
+        for i in range(3):
+            self.game_instance.tokens[chosen] = i
+            self.assertRaises(GameError, self.game_instance.player_draw_2_same, color=chosen, p_id=0)
 
 
 class CrossClassTests(unittest.TestCase):
+    def setUp(self):
+        self.player_count = randint(2, 4)
+        self.game_instance = Game(self.player_count)
+        self.game_instance.full_setup()
 
+    @staticmethod
+    def naive_decide_on_tokens(card: Card, tokens: list):
+        """
+        Naively check which colors are needed for the card, to decide what tokens to draw
+
+        NOTE: THIS METHOD DOES NOT TAKE CARDS THAT PLAYER ALREADY HAS INTO ACCOUNT FOR BUYING!!!
+
+        :param card: card of interest
+        :param tokens: tokens that player has so far
+        :return: tuple with:
+            1. the decision whether to take 3x1 or 1x2 (2 means we need to take 2 of same color, 1 the other way around)
+            2. respectively to decision, an int with missing color code, or list of ints that encode colors needed
+        """
+        colors_needed = []
+        colors_needed += [0] if card.cost[0] > 0 else []
+        colors_needed += [1] if card.cost[1] > 0 else []
+        colors_needed += [2] if card.cost[2] > 0 else []
+        colors_needed += [3] if card.cost[3] > 0 else []
+        colors_needed += [4] if card.cost[4] > 0 else []
+        tokens_missing = []
+        print("needed colors:", colors_needed)
+        for c in colors_needed:
+            if card.cost[c] > tokens[c]:
+                tokens_missing += [c]
+
+        if len(tokens_missing) == 1:
+            return tuple([2, tokens_missing[0]])
+        if len(tokens_missing) > 1:
+            return tuple([1, list(tokens_missing[:3])])
 
     def test_give_take_token(self):
         """
@@ -409,7 +542,7 @@ class CrossClassTests(unittest.TestCase):
                 for _ in range(tokens+3):
                     try:
                         test_game.give_token(c_id, 0)
-                    except ValueError:
+                    except GameError:
                         pass
                     self.assertEqual(tokens,
                                      test_game.tokens[c_id]+test_game.players[0].tokens[c_id])
@@ -418,12 +551,128 @@ class CrossClassTests(unittest.TestCase):
                 for _ in range(tokens+3):
                     try:
                         test_game.take_token(c_id, 0)
-                    except ValueError:
+                    except GameError:
                         pass
                     self.assertEqual(tokens,
                                      test_game.tokens[c_id]+test_game.players[0].tokens[c_id])
                     self.assertGreaterEqual(test_game.tokens[c_id], 0)
                     self.assertGreaterEqual(test_game.players[0].tokens[c_id], 0)
+
+    def test_player_check_selection(self):
+        """
+        tests correctness of selecting open cards or tops of libraries
+        """
+        deck_sizes = [len(self.game_instance.l1_deck),
+                      len(self.game_instance.l2_deck),
+                      len(self.game_instance.l3_deck)]
+        # random open card
+        select1 = (randint(0, 2), randint(0, 3))
+        # random card on top of the respective level's deck
+        select2 = (randint(0, 2), 4)
+        # improper value
+        select3 = randint(3, 120), randint(5, 10247)
+        p: Player = self.game_instance.players[0]
+        try:
+            p.check_selection(self.game_instance.open_cards, deck_sizes=deck_sizes, desired_card=select1)
+        except GameError:
+            raise AssertionError("this selection should be correct but it failed")
+        try:
+            p.check_selection(self.game_instance.open_cards, deck_sizes=deck_sizes, desired_card=select2)
+        except GameError:
+            raise AssertionError("this selection should be correct but it failed")
+        # modifying deck statuses to throw
+        self.game_instance.open_cards[select1[0]][select1[1]] = None
+        if select2[0] == 0:
+            self.game_instance.l1_deck = []
+        if select2[0] == 1:
+            self.game_instance.l2_deck = []
+        if select2[0] == 2:
+            self.game_instance.l3_deck = []
+        deck_sizes = [len(self.game_instance.l1_deck),
+                      len(self.game_instance.l2_deck),
+                      len(self.game_instance.l3_deck)]
+        self.assertRaises(GameError, p.check_selection, self.game_instance.open_cards, deck_sizes, select1)
+        self.assertRaises(GameError, p.check_selection, self.game_instance.open_cards, deck_sizes, select2)
+        self.assertRaises(GameError, p.check_selection, self.game_instance.open_cards, deck_sizes, select3)
+
+    def test_player_draw_tokens_and_buy(self):
+        """
+        tests a mocked up procedure of playing a couple turns and buying level 1 card from first row of open cards
+        """
+        ch = choice([0, 1, 2, 3])
+        card = self.game_instance.open_cards[0][ch]
+        p_id = randint(0, self.player_count-1)
+        turns = 1
+        print(card)
+        while not self.game_instance.players[p_id].can_buy(card)[0]:
+            needs = self.naive_decide_on_tokens(card, self.game_instance.players[p_id].tokens)
+            print(needs)
+            if needs[0] == 1:
+                self.game_instance.player_draw_3(needs[1], p_id)
+            elif needs[0] == 2:
+                self.game_instance.player_draw_2_same(needs[1], p_id)
+            turns += 1
+            print(self.game_instance.players[p_id].tokens)
+            if turns > 5:
+                raise AssertionError("too many turns have passed, player should already have tokens to buy")
+        self.game_instance.player_buys(card, desired_card=(0, ch), p_id=p_id)
+
+    def test_player_select_card(self):
+        """
+        testing player selection correctness with stdin overriding by simple StringIO; multiple 'input()'
+        function calls are handled by providing \n in new stdin body, to indicate value after \n has to be passed to
+        the following input() call
+        this doubles on the previous 'check_selection' test, but now uses stdin for checks, mocking actual player input
+        TODO: implement sys.stdin overrides as context manager to simplify the test
+        TODO: convert select_cards to broader player_select from Game class
+        TODO: find better alternative for stdout.flush() to stop polluting console/filedump
+        """
+        # raising at wrong input
+        toomuch1 = randint(5, 1294)
+        toomuch2 = randint(5, 1294)
+        orig_stdin = sys.stdin
+        sys.stdin = StringIO(f"{toomuch1}\n{toomuch2}")
+        self.assertRaises(GameError,
+                          self.game_instance.players[0].select_card,
+                          open_cards=self.game_instance.open_cards,
+                          deck_sizes=self.game_instance.deck_sizes)
+        sys.stdin = orig_stdin
+        sys.stdout.flush()
+        # raising when top of library empty
+        for i in range(3):
+            orig_stdin = sys.stdin
+            orig_dek = getattr(self.game_instance, lvl_dek := f"l{i+1}_deck")
+            setattr(self.game_instance, lvl_dek, [])
+            # equivalent to: self.game_instance.level_deck = []
+            sys.stdin = StringIO(f"{i}\n4")
+            self.assertRaises(GameError,
+                              self.game_instance.players[0].select_card,
+                              open_cards=self.game_instance.open_cards,
+                              deck_sizes=self.game_instance.deck_sizes)
+            sys.stdin = orig_stdin
+            sys.stdout.flush()
+            setattr(self.game_instance, lvl_dek, orig_dek)
+        # raising when no card in chosen spot
+        chosen_card = randint(0, 2), randint(0, 3)
+        orig_card = self.game_instance.open_cards[chosen_card[0]][chosen_card[1]]
+        self.game_instance.open_cards[chosen_card[0]][chosen_card[1]] = None
+        orig_stdin = sys.stdin
+        sys.stdin = StringIO(f"{chosen_card[0]}\n{chosen_card[1]}")
+        self.assertRaises(GameError,
+                          self.game_instance.players[0].select_card,
+                          open_cards=self.game_instance.open_cards,
+                          deck_sizes=self.game_instance.deck_sizes)
+        sys.stdin = orig_stdin
+        sys.stdout.flush()
+        self.game_instance.open_cards[chosen_card[0]][chosen_card[1]] = orig_card
+        # regular case
+        orig_stdin = sys.stdin
+        sys.stdin = StringIO(f"{chosen_card[0]}\n{chosen_card[1]}")
+        r, c = self.game_instance.players[0].select_card(self.game_instance.open_cards, self.game_instance.deck_sizes)
+        sys.stdin = orig_stdin
+        sys.stdout.flush()
+        self.assertEqual(r, chosen_card[0])
+        self.assertEqual(c, chosen_card[1])
 
 
 if __name__ == '__main__':

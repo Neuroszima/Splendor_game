@@ -133,3 +133,4 @@ dmypy.json
 # and main output that's fed into STD with ">" into another file, to avoid stream access coflicts
 results.txt
 results2.txt
+draft.py

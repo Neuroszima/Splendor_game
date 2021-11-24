@@ -1,6 +1,11 @@
 import re
 import ast
 from random import randint
+from typing import Union
+
+
+class GameError(Exception):
+    pass
 
 
 class Card:
@@ -63,9 +68,7 @@ class Card:
 
     def can_be_bought(self, other):
         """
-        for simplicity, invoking counterpart method from 'player' class
-        :param other:
-        :return:
+        for simplicity, invoking counterpart method from 'Player' class
         """
         # guard condition
         if isinstance(other, Card):
@@ -94,6 +97,56 @@ class Player:
         self.id = p_id
         self.tokens = [0] * 6
         self.cards = []
+        self.reserved = []
+
+    @staticmethod
+    def provide_position():
+        chosen = False
+        while not chosen:
+            try:
+                row = input("choose row of cards")
+                card = input("choose card in given row")
+                r = int(row)
+                c = int(card)
+                chosen = True
+                return r, c
+            except ValueError as e:
+                print("couldn't convert inputs into integer numbers, make sure you typed correct data")
+
+    @staticmethod
+    def check_selection(open_cards, deck_sizes, desired_card):
+        if not (desired_card[0] in [0, 1, 2]) or not(desired_card[1] in [0, 1, 2, 3, 4]):
+            raise GameError("selection doesn't match any of the available positions")
+        if desired_card[1] < 4:
+            if open_cards[desired_card[0]][desired_card[1]] is None:
+                raise GameError("there is no card at given position")
+        if desired_card[1] == 4:
+            # check tops of the given row's deck
+            if desired_card[0] == 0:
+                if deck_sizes[0] == 0:
+                    raise GameError("no card in the L1 deck")
+            if desired_card[0] == 1:
+                if deck_sizes[1] == 0:
+                    raise GameError("no card in the L2 deck")
+            if desired_card[0] == 2:
+                if deck_sizes[2] == 0:
+                    raise GameError("no card in the L3 deck")
+
+    @property
+    def buying_power(self):
+        # this avoids deepcopy
+        power = [_ for _ in self.tokens]
+        for card in self.cards:
+            power[card.color_id] += 1
+        return power
+
+    @property
+    def card_power(self):
+        power = [0] * 5
+        for card in self.cards:
+            if card.color_id != 5:
+                power[card.color_id] += 1
+        return power
 
     def can_buy(self, other: Card):
         """
@@ -121,21 +174,6 @@ class Player:
             return False, lacking
         return True, lacking
 
-    @property
-    def buying_power(self):
-        power = [_ for _ in self.tokens]
-        for card in self.cards:
-            power[card.color_id] += 1
-        return power
-
-    @property
-    def card_power(self):
-        power = [0] * 5
-        for card in self.cards:
-            if card.color_id != 5:
-                power[card.color_id] += 1
-        return power
-
     def get_token(self, color: int):
         self.tokens[color] += 1
 
@@ -149,26 +187,39 @@ class Player:
 
     def pay_token(self, color: int):
         if self.tokens[color] == 0:
-            raise ValueError("can't pay more, we have 0 tokens")
+            raise GameError("can't pay more, we have 0 tokens")
         self.tokens[color] -= 1
 
-    def buy_card(self, card):
-        """
-        Note: change the __ge__ to a meaningfully named function call
-        :param card:
-        :return:
-        """
+    def buy_card(self, card: Card):
         if (cmp := self.can_buy(card))[0]:
             self.cards.append(card)
             paid = self.pay_tokens(cmp, card)
             return True, paid
         return False, [0] * 6
 
+    def buy_reserve(self, desired_card: tuple):
+        if (cmp := self.can_buy(card := self.reserved[desired_card[0]]))[0]:
+            self.cards.append(self.reserved.pop(desired_card[0]))
+            paid = self.pay_tokens(cmp, card)
+            return True, paid
+        return False, [0] * 6
+
+    def reserve(self, card: Card):
+        if len(self.reserved) > 2:
+            raise GameError("can't reserve more than 3 cards, buy the reserved card out to free space")
+        self.reserved += [card]
+
+    def select_card(self, open_cards, deck_sizes):
+        desired_card = self.provide_position()
+        # function call serving as guard statement
+        self.check_selection(open_cards, deck_sizes, desired_card)
+        return desired_card
+
 
 class Game:
     def __init__(self, player_count: int):
         if not (1 < player_count < 5):
-            raise ValueError("cant start game with improper number of players")
+            raise GameError("cant start game with improper number of players")
         self.player_count = player_count
         self.l1_deck = []
         self.l2_deck = []
@@ -206,6 +257,10 @@ class Game:
     def shuffle(_decks):
         return [Game.shuffle_dek(_d) for _d in _decks]
 
+    @property
+    def deck_sizes(self):
+        return [len(self.l1_deck), len(self.l2_deck), len(self.l3_deck)]
+
     def setup_tokens(self):
         if self.player_count > 2:
             if self.player_count == 4:
@@ -238,41 +293,81 @@ class Game:
 
     def give_token(self, color: int, p_id: int):
         if not 0 <= color <= 5:
-            raise ValueError('color does not exist')
+            raise GameError('color does not exist')
         if self.tokens[color] > 0:
             self.tokens[color] -= 1
             self.players[p_id].get_token(color)
             return
-        raise ValueError("can't give tokens of a color when there's none")
+        raise GameError("can't give tokens of a color when there's none")
 
     def take_token(self, color: int, p_id: int):
         if not 0 <= color <= 5:
-            raise ValueError('color does not exist')
+            raise GameError('color does not exist')
         if self.players[p_id].tokens[color] > 0:
             self.tokens[color] += 1
             self.players[p_id].pay_token(color)
             return
-        raise ValueError("can't take tokens when player has none")
+        raise GameError("can't take tokens when player has none")
 
-    def player_draw_3(self, colors: list, p_id: int):
-        for color in colors:
-            self.give_token(color, p_id=p_id)
+    def player_draw_3(self, colors: Union[list, tuple], p_id: int):
+        if 0 < len(colors) < 4:
+            for color in colors:
+                self.give_token(color, p_id=p_id)
+            return
+        raise GameError("too many or too little colors chosen")
 
     def player_draw_2_same(self, color: int, p_id: int):
         if self.tokens[color] > 2:
             self.give_token(color, p_id)
             self.give_token(color, p_id)
             return
-        raise ValueError("given color isn't available to be chosen in that option")
+        raise GameError("given color isn't available to be chosen in that option")
 
-    def player_buys(self, desired_card: Card, p_id: int):
-        for row in self.open_cards:
-            for card in row:
-                if desired_card is card:
-                    bought, paid = self.players[p_id].buy_card(desired_card)
-                    for color, tokens in paid:
-                        self.tokens[color] += tokens
-        raise ValueError("desired card couldn't be found in the cards present in open")
+    def player_select(self, p_id: int):
+        self.players[p_id]: Player
+        desired_card = self.players[p_id].select_card(self.open_cards, self.deck_sizes)
+        # the necessary check were already performed in 'Player' by this point
+        if desired_card[1] == 4:
+            # reserve-only - selecting top of the corresponding deck
+            # since i am using pop to push new cards onto open field, the last element of the
+            # card list in a deck is considered it's top
+            if desired_card[0] == 0:
+                card = self.l1_deck[-1]
+            if desired_card[0] == 1:
+                card = self.l2_deck[-1]
+            if desired_card[0] == 2:
+                card = self.l3_deck[-1]
+        else:
+            card = self.open_cards[desired_card[0]][desired_card[1]]
+        return card, desired_card
+
+    def player_buys(self, card: Card, desired_card: tuple, p_id: int):
+        # traditional buy
+        if desired_card[1] in [0, 1, 2, 3]:
+            bought, paid = self.players[p_id].buy_card(card)
+            if bought:
+                self.open_cards[desired_card[0]][desired_card[1]] = None
+        # buy from reserve
+        elif desired_card[1] == 4:
+            bought, paid = self.players[p_id].buy_reserve(desired_card)
+        for color, tokens in enumerate(paid):
+            self.tokens[color] += tokens
+
+    def player_reserve(self, card: Card, desired_card: tuple, p_id: int):
+        if desired_card[1] == 4:
+            self.players[p_id].reserve(card)
+            if desired_card[0] == 0:
+                c = self.l1_deck.pop()
+            if desired_card[0] == 1:
+                c = self.l2_deck.pop()
+            if desired_card[0] == 2:
+                c = self.l3_deck.pop()
+        else:
+            self.players[p_id].reserve(card)
+            self.open_cards[desired_card[0]][desired_card[1]] = None
+            c = card
+        self.give_token(Card.COLOR_IDS['x'][1], p_id)
+        return c
 
 
 if __name__ == '__main__':
