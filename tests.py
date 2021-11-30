@@ -10,9 +10,68 @@ from re import match, findall, search
 from ast import literal_eval
 from copy import deepcopy
 from os import remove
-from io import StringIO
+from io import StringIO, TextIOWrapper, FileIO
+from contextlib import suppress, AbstractContextManager
+from typing import Union
 
 from main import Card, Player, Game, GameError
+
+
+class SimpleStdOutInRedirect(AbstractContextManager):
+    """
+    class constructed to mock input() console sdtin interface.
+    additional stdout mock is here to capture any unwanted text from "input()"'s passed arguments,
+    that would otherwise bleed into prints at the other tests or at the end of the suite
+    the StringIO can also be used to gather info about what is triggered
+    """
+    def __init__(self, new_in_stream: Union[StringIO, TextIOWrapper, FileIO]):
+        self.new_stream = new_in_stream
+        self.old_in = None
+        self.old_out = sys.stdout
+        self.new_out = None
+
+    def __enter__(self):
+        self.old_in = sys.stdin
+        sys.stdin = self.new_stream
+        self.new_out = StringIO("")
+        sys.stdout = self.new_out
+        return self.new_out
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        sys.stdin = self.old_in
+        sys.stdout = self.old_out
+        self.new_out.close()
+
+
+class SuppressedStdRedirect(suppress):
+    """
+    Variation on above SimpleStdInOutRedirect, more customizable and offering
+    additional exception suppression if needed
+    """
+    # noinspection SpellCheckingInspection
+    def __init__(self, in_stream_replacement: Union[StringIO, TextIOWrapper, FileIO],
+                 out_stream_replacement: Union[StringIO, TextIOWrapper, FileIO], *exceptions):
+        self.in_stream_replacement = in_stream_replacement
+        self.out_stream_replacement = out_stream_replacement
+        self.out_stream = 'stdout'
+        self.in_stream = 'stdin'
+        self._old_targets = []
+        self._old_inputs = []
+        super().__init__(exceptions)
+
+    def __enter__(self):
+        self._old_targets.append(getattr(sys, self.out_stream))
+        self._old_inputs.append(getattr(sys, self.in_stream))
+        setattr(sys, self.in_stream, self.in_stream_replacement)
+        setattr(sys, self.out_stream, self.out_stream_replacement)
+        return self.out_stream_replacement
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.in_stream_replacement.close()
+        self.out_stream_replacement.close()
+        setattr(sys, self.out_stream, self._old_targets.pop())
+        setattr(sys, self.in_stream, self._old_inputs.pop())
+        return super().__exit__(exc_type, exc_val, exc_tb)
 
 
 class CardTest(unittest.TestCase):
@@ -70,10 +129,11 @@ class CardTest(unittest.TestCase):
             card.can_be_bought(card2)
         except Exception as e:
             self.assertIs(e.__class__, NotImplementedError)
-        try:
-            card.can_be_bought(choice(class_list))
-        except Exception as e:
-            self.assertIs(e.__class__, ValueError)
+        for c in class_list:
+            try:
+                card.can_be_bought(c)
+            except Exception as e:
+                self.assertIs(e.__class__, ValueError)
 
     def test_id_property(self):
         chois = choice(self.all_cards)
@@ -145,7 +205,7 @@ class PlayerTest(unittest.TestCase):
         return [rubies_missing, diamonds_missing, onyxes_missing, emeralds_missing, sapphires_missing]
 
     def test_init(self):
-        rando_argument = [
+        random_argument = [
             chr(randint(32, 97)),
             [randint(0, 2)]*randint(0, 5),
             tuple([randint(0, 2)]*randint(0, 5))
@@ -154,7 +214,8 @@ class PlayerTest(unittest.TestCase):
         self.assertEqual(player.tokens, [0]*6)
         self.assertEqual(player.id, self.pid)
         self.assertEqual(player.cards, [])
-        self.assertRaises(ValueError, Player, p_id=choice(rando_argument))
+        for arg in random_argument:
+            self.assertRaises(ValueError, Player, p_id=arg)
 
     def test_card_power(self):
         total_card_power = self.card_power_function(self.chosen_cards)
@@ -269,38 +330,36 @@ class PlayerTest(unittest.TestCase):
                     print("DID NOT BUY - OK")
 
     def test_reserve(self):
-        self.assertEqual([], self.player_instance.reserved)
+        self.assertEqual((None, None, None), self.player_instance.reserved)
         test_card = self.chosen_cards[0]
         self.player_instance.reserve(test_card)
+        self.assertEqual(3, len(self.player_instance.reserved))
         self.assertIn(test_card, self.player_instance.reserved)
         self.player_instance.reserve(test_card)
+        self.assertEqual(3, len(self.player_instance.reserved))
         self.player_instance.reserve(test_card)
+        self.assertEqual(3, len(self.player_instance.reserved))
         self.assertRaises(GameError, self.player_instance.reserve, card=test_card)
+        self.assertEqual(3, len(self.player_instance.reserved))
 
     def test_buy_reserve(self):
         original_tokens = [5 for _ in range(6)]
         self.player_instance.tokens = original_tokens
         card = Card(choice(self.all_cards))
-        while not (cmp := self.player_instance.can_buy(card))[0]:
+        while not (self.player_instance.can_buy(card))[0]:
             card = Card(choice(self.all_cards))
         self.player_instance.reserve(card)
-        self.player_instance.buy_reserve(tuple([0, 4]))
+        self.player_instance.buy_reserve(0)
         self.assertIn(card, self.player_instance.cards)
-        self.assertEqual([], self.player_instance.reserved)
+        self.assertEqual((None, None, None), self.player_instance.reserved)
 
     def test_provide_position(self):
-        orig_stdin = sys.stdin
-        sys.stdin = StringIO(" \n ")
-        self.assertRaises(EOFError, self.player_instance.provide_position)
-        sys.stdin = orig_stdin
+        with SimpleStdOutInRedirect(StringIO(" \n ")) as _:
+            self.assertRaises(EOFError, self.player_instance.provide_position)
         a = randint(0, 3)
         b = randint(0, 2)
-        print()  # printing to flush stdin stream and prepare it for another test
-        orig_stdin = sys.stdin
-        sys.stdin = StringIO(f"{a}\n{b}")
-        r, c = self.player_instance.provide_position()
-        sys.stdin = orig_stdin
-        print()
+        with SimpleStdOutInRedirect(StringIO(f"{a}\n{b}")) as _:
+            r, c = self.player_instance.provide_position()
         self.assertEqual(a, r)
         self.assertEqual(b, c)
 
@@ -372,7 +431,7 @@ class GameTest(unittest.TestCase):
         self.assertRaises(GameError, test_game.give_token, color=color_id, p_id=player_id)
 
     def test_card_reading(self):
-        testgame = Game(randint(2, 4))
+        test_game = Game(randint(2, 4))
         file = open('cards.txt', 'r')
         lines = [file.readline() for _ in range(randint(1, 70))]
         # comment lines in the file start with "#"
@@ -381,7 +440,7 @@ class GameTest(unittest.TestCase):
         test_file = 'test.txt'
         with open(test_file, 'x') as tf:
             tf.writelines(lines)
-        cards = testgame.load_cards(test_file)
+        cards = test_game.load_cards(test_file)
         remove(test_file)
         self.assertEqual(len(card_lines), len(cards))
 
@@ -442,6 +501,49 @@ class GameTest(unittest.TestCase):
             self.game_instance.l3_deck.pop()
         self.assertEqual(poped_vals, self.game_instance.deck_sizes)
 
+    def test_card_replace(self):
+        # clean game - no reason to substitute cards when nothing has been taken/reserved
+        opencard_dmp = deepcopy(self.game_instance.open_cards)
+        self.game_instance.replace_empty()
+        for row, post_replace_row in zip(opencard_dmp, self.game_instance.open_cards):
+            self.assertEqual(row, post_replace_row)
+        # substitution process
+        first_row = randint(0, 3)
+        second_row = randint(0, 3)
+        third_row = randint(0, 3)
+        c1 = self.game_instance.l1_deck[-1]
+        c2 = self.game_instance.l2_deck[-1]
+        c3 = self.game_instance.l3_deck[-1]
+        c1.marker = 1
+        c2.marker = 2
+        c3.marker = 3
+        self.game_instance.open_cards[0][first_row] = None
+        self.game_instance.open_cards[1][second_row] = None
+        self.game_instance.open_cards[2][third_row] = None
+        self.game_instance.replace_empty()
+        # all empty spots get replaced
+        for row in self.game_instance.open_cards:
+            self.assertNotIn(None, row)
+        assert hasattr(self.game_instance.open_cards[0][first_row], 'marker')
+        assert hasattr(self.game_instance.open_cards[1][second_row], 'marker')
+        assert hasattr(self.game_instance.open_cards[2][third_row], 'marker')
+        # attempt to force raise (that should be ignored) at empty libraries,
+        # it is not mistake to allow continuing, when decks are empty
+        self.game_instance.open_cards[0][first_row] = None
+        self.game_instance.open_cards[1][second_row] = None
+        self.game_instance.open_cards[2][third_row] = None
+        self.game_instance.l1_deck = []
+        self.game_instance.l2_deck = []
+        self.game_instance.l3_deck = []
+        opencard_dmp = deepcopy(self.game_instance.open_cards)
+        try:
+            self.game_instance.replace_empty()
+        except IndexError:
+            raise AssertionError("empty libraries should not throw an error")
+        # the state of the game should be unaltered
+        for row, post_replace_row in zip(opencard_dmp, self.game_instance.open_cards):
+            self.assertEqual(row, post_replace_row)
+
     def test_player_draw_3(self):
         c = [0, 1, 2, 3, 4]
         self.assertRaises(GameError, self.game_instance.player_draw_3, colors=c, p_id=0)
@@ -495,6 +597,7 @@ class CrossClassTests(unittest.TestCase):
         self.player_count = randint(2, 4)
         self.game_instance = Game(self.player_count)
         self.game_instance.full_setup()
+        self.p_id = randint(0, self.player_count-1)
 
     @staticmethod
     def naive_decide_on_tokens(card: Card, tokens: list):
@@ -536,23 +639,18 @@ class CrossClassTests(unittest.TestCase):
             test_game = Game(playernum)
             test_game.setup_players()
             test_game.tokens = [tokens] * 5 + [5]
-            test_game.players[0]: Player
             for c_co in Card.COLOR_CODES[:5]:
                 c_id = Card.COLOR_IDS[c_co][1]
                 for _ in range(tokens+3):
-                    try:
+                    with suppress(GameError):
                         test_game.give_token(c_id, 0)
-                    except GameError:
-                        pass
                     self.assertEqual(tokens,
                                      test_game.tokens[c_id]+test_game.players[0].tokens[c_id])
                     self.assertGreaterEqual(test_game.tokens[c_id], 0)
                     self.assertGreaterEqual(test_game.players[0].tokens[c_id], 0)
                 for _ in range(tokens+3):
-                    try:
+                    with suppress(GameError):
                         test_game.take_token(c_id, 0)
-                    except GameError:
-                        pass
                     self.assertEqual(tokens,
                                      test_game.tokens[c_id]+test_game.players[0].tokens[c_id])
                     self.assertGreaterEqual(test_game.tokens[c_id], 0)
@@ -562,24 +660,32 @@ class CrossClassTests(unittest.TestCase):
         """
         tests correctness of selecting open cards or tops of libraries
         """
-        deck_sizes = [len(self.game_instance.l1_deck),
-                      len(self.game_instance.l2_deck),
-                      len(self.game_instance.l3_deck)]
+        deck_sizes = self.game_instance.deck_sizes
+        open_cards = self.game_instance.open_cards
         # random open card
         select1 = (randint(0, 2), randint(0, 3))
-        # random card on top of the respective level's deck
+        # random card on top of the respective level's deck (future reservation-only)
         select2 = (randint(0, 2), 4)
+        # random card form the player reservation pool
+        select3 = (randint(0, 2), 5)
         # improper value
-        select3 = randint(3, 120), randint(5, 10247)
+        select4 = randint(3, 120), randint(6, 10247)
         p: Player = self.game_instance.players[0]
         try:
-            p.check_selection(self.game_instance.open_cards, deck_sizes=deck_sizes, desired_card=select1)
+            p.check_selection(open_cards, deck_sizes, desired_card=select1)
         except GameError:
             raise AssertionError("this selection should be correct but it failed")
         try:
-            p.check_selection(self.game_instance.open_cards, deck_sizes=deck_sizes, desired_card=select2)
+            p.check_selection(open_cards, deck_sizes, desired_card=select2)
         except GameError:
             raise AssertionError("this selection should be correct but it failed")
+        # mock player reserving card
+        p.reserved = tuple([self.game_instance.open_cards[i][select1[1]] for i in range(3)])
+        try:
+            p.check_selection(open_cards, deck_sizes, desired_card=select3)
+        except GameError:
+            raise AssertionError("this selection should be correct but it failed")
+        # self.assertIs(self.game_instance.open_cards[select3[0]][select1[1]], )
         # modifying deck statuses to throw
         self.game_instance.open_cards[select1[0]][select1[1]] = None
         if select2[0] == 0:
@@ -588,11 +694,15 @@ class CrossClassTests(unittest.TestCase):
             self.game_instance.l2_deck = []
         if select2[0] == 2:
             self.game_instance.l3_deck = []
-        deck_sizes = [len(self.game_instance.l1_deck),
-                      len(self.game_instance.l2_deck),
-                      len(self.game_instance.l3_deck)]
+        # refreshing deck sizes
+        deck_sizes = self.game_instance.deck_sizes
         self.assertRaises(GameError, p.check_selection, self.game_instance.open_cards, deck_sizes, select1)
         self.assertRaises(GameError, p.check_selection, self.game_instance.open_cards, deck_sizes, select2)
+        self.assertRaises(GameError, p.check_selection, self.game_instance.open_cards, deck_sizes, select4)
+        # modifying player hand to throw
+        p.reserved = []
+        self.assertRaises(GameError, p.check_selection, self.game_instance.open_cards, deck_sizes, select3)
+        p.reserved = [None] * 3
         self.assertRaises(GameError, p.check_selection, self.game_instance.open_cards, deck_sizes, select3)
 
     def test_player_draw_tokens_and_buy(self):
@@ -610,12 +720,22 @@ class CrossClassTests(unittest.TestCase):
             if needs[0] == 1:
                 self.game_instance.player_draw_3(needs[1], p_id)
             elif needs[0] == 2:
-                self.game_instance.player_draw_2_same(needs[1], p_id)
+                # if there is less than 3 tokens for a given color,
+                # mock 2 additional extra colors and grab 1 of each
+                if self.game_instance.tokens[needs[1]] > 2:
+                    self.game_instance.player_draw_2_same(needs[1], p_id)
+                else:
+                    colors = list(range(5))
+                    colors.remove(needs[1])
+                    shuffle(colors)
+                    colors = colors[:2] + [needs[1]]
+                    self.game_instance.player_draw_3(colors, p_id)
             turns += 1
             print(self.game_instance.players[p_id].tokens)
             if turns > 5:
                 raise AssertionError("too many turns have passed, player should already have tokens to buy")
         self.game_instance.player_buys(card, desired_card=(0, ch), p_id=p_id)
+        self.assertIn(card, self.game_instance.players[p_id].cards)
 
     def test_player_select_card(self):
         """
@@ -623,56 +743,146 @@ class CrossClassTests(unittest.TestCase):
         function calls are handled by providing \n in new stdin body, to indicate value after \n has to be passed to
         the following input() call
         this doubles on the previous 'check_selection' test, but now uses stdin for checks, mocking actual player input
-        TODO: implement sys.stdin overrides as context manager to simplify the test
-        TODO: convert select_cards to broader player_select from Game class
-        TODO: find better alternative for stdout.flush() to stop polluting console/filedump
         """
+        # input repeat
+        with SimpleStdOutInRedirect(StringIO(' \n ')) as _:
+            self.assertRaises(EOFError, self.game_instance.player_select, p_id=0)
+
         # raising at wrong input
-        toomuch1 = randint(5, 1294)
-        toomuch2 = randint(5, 1294)
-        orig_stdin = sys.stdin
-        sys.stdin = StringIO(f"{toomuch1}\n{toomuch2}")
-        self.assertRaises(GameError,
-                          self.game_instance.players[0].select_card,
-                          open_cards=self.game_instance.open_cards,
-                          deck_sizes=self.game_instance.deck_sizes)
-        sys.stdin = orig_stdin
-        sys.stdout.flush()
+        too_much1 = randint(5, 1294)
+        too_much2 = randint(5, 1294)
+        with SimpleStdOutInRedirect(StringIO(f"{too_much1}\n{too_much2}")) as _:
+            self.assertRaises(GameError, self.game_instance.player_select, p_id=0)
+
         # raising when top of library empty
         for i in range(3):
-            orig_stdin = sys.stdin
             orig_dek = getattr(self.game_instance, lvl_dek := f"l{i+1}_deck")
             setattr(self.game_instance, lvl_dek, [])
             # equivalent to: self.game_instance.level_deck = []
-            sys.stdin = StringIO(f"{i}\n4")
-            self.assertRaises(GameError,
-                              self.game_instance.players[0].select_card,
-                              open_cards=self.game_instance.open_cards,
-                              deck_sizes=self.game_instance.deck_sizes)
-            sys.stdin = orig_stdin
-            sys.stdout.flush()
+            with SimpleStdOutInRedirect(StringIO(f"{i}\n4")) as _:
+                self.assertRaises(GameError, self.game_instance.player_select, p_id=0)
             setattr(self.game_instance, lvl_dek, orig_dek)
+
+        # raising when no card in player reservation
+        with SimpleStdOutInRedirect(StringIO(f"{randint(0, 2)}\n5")) as _:
+            self.assertRaises(GameError, self.game_instance.player_select, p_id=0)
+        self.game_instance.players[0].reserved = [None] * 3
+        for i in range(3):
+            with SimpleStdOutInRedirect(StringIO(f"{i}\n5")) as _:
+                self.assertRaises(GameError, self.game_instance.player_select, p_id=0)
+
         # raising when no card in chosen spot
         chosen_card = randint(0, 2), randint(0, 3)
         orig_card = self.game_instance.open_cards[chosen_card[0]][chosen_card[1]]
         self.game_instance.open_cards[chosen_card[0]][chosen_card[1]] = None
-        orig_stdin = sys.stdin
-        sys.stdin = StringIO(f"{chosen_card[0]}\n{chosen_card[1]}")
-        self.assertRaises(GameError,
-                          self.game_instance.players[0].select_card,
-                          open_cards=self.game_instance.open_cards,
-                          deck_sizes=self.game_instance.deck_sizes)
-        sys.stdin = orig_stdin
-        sys.stdout.flush()
+        with SimpleStdOutInRedirect(StringIO(f"{chosen_card[0]}\n{chosen_card[1]}")) as _:
+            self.assertRaises(GameError, self.game_instance.player_select, p_id=0)
         self.game_instance.open_cards[chosen_card[0]][chosen_card[1]] = orig_card
+
         # regular case
-        orig_stdin = sys.stdin
-        sys.stdin = StringIO(f"{chosen_card[0]}\n{chosen_card[1]}")
-        r, c = self.game_instance.players[0].select_card(self.game_instance.open_cards, self.game_instance.deck_sizes)
-        sys.stdin = orig_stdin
-        sys.stdout.flush()
-        self.assertEqual(r, chosen_card[0])
-        self.assertEqual(c, chosen_card[1])
+        with SimpleStdOutInRedirect(StringIO(f"{chosen_card[0]}\n{chosen_card[1]}")) as _:
+            card, chosen_slot = self.game_instance.player_select(p_id=0)
+        self.assertEqual(chosen_card[0], chosen_slot[0])
+        self.assertEqual(chosen_card[1], chosen_slot[1])
+        self.assertTrue(isinstance(card, Card))
+
+        # regular case with library top
+        reserve_row = chosen_card[0]
+        with SimpleStdOutInRedirect(StringIO(f"{reserve_row}\n4")) as _:
+            card, chosen_slot = self.game_instance.player_select(p_id=0)
+        self.assertEqual(chosen_card[0], chosen_slot[0])
+        self.assertEqual(4, chosen_slot[1])
+        self.assertIsInstance(card, Card)
+        if reserve_row == 0:
+            print('row 1')
+            self.assertIs(card, self.game_instance.l1_deck.pop())
+        if reserve_row == 1:
+            print('row 2')
+            self.assertIs(card, self.game_instance.l2_deck.pop())
+        if reserve_row == 2:
+            print('row 3')
+            self.assertIs(card, self.game_instance.l3_deck.pop())
+
+    def test_player_buys_selected(self):
+        """
+        tests if after selection of the card, the buy procedure can trigger/raise properly
+        """
+        # can buy properly selected card
+        self.game_instance.players[self.p_id].tokens = [5 for _ in range(len(Card.COLOR_CODES))]
+        with SimpleStdOutInRedirect(StringIO(f'0\n{randint(0, 3)}')) as _:
+            card, position = self.game_instance.player_select(self.p_id)
+            self.game_instance.player_buys(card, position, self.p_id)
+            self.assertIn(card, self.game_instance.players[self.p_id].cards)
+
+        # can't buy properly selected card
+        self.game_instance.full_setup()  # reset everything
+        with SimpleStdOutInRedirect(StringIO(f'{randint(0, 2)}\n{randint(0, 3)}')) as _:
+            card, position = self.game_instance.player_select(self.p_id)
+            self.game_instance.player_buys(card, position, self.p_id)
+            self.assertEqual([], self.game_instance.players[self.p_id].cards)
+
+        # player buys, but from reserve
+        self.game_instance.players[self.p_id].tokens = [5 for _ in range(len(Card.COLOR_CODES))]
+        card_selected = 0, randint(0, 3)
+        reserve_select = 0, 5
+        with SimpleStdOutInRedirect(StringIO(f'{card_selected[0]}\n{card_selected[1]}\n'
+                                             f'{reserve_select[0]}\n{reserve_select[1]}')) as _:
+            card, position = self.game_instance.player_select(self.p_id)
+            self.game_instance.player_reserve(card, position, self.p_id)
+            self.assertIn(card, self.game_instance.players[self.p_id].reserved)
+            card, position = self.game_instance.player_select(self.p_id)
+            self.game_instance.player_buys(card, position, self.p_id)
+        print(card)
+        print(self.game_instance.players[self.p_id].cards[0])
+        print(self.game_instance.players[self.p_id].tokens)
+        print(self.game_instance.players[self.p_id].cards)
+        print(self.game_instance.players[self.p_id].reserved)
+        self.assertTrue(not not self.game_instance.players[self.p_id].cards)
+        self.assertIn(card, self.game_instance.players[self.p_id].cards)
+
+        # players try to buy from reserve that is empty
+        with SimpleStdOutInRedirect(StringIO(f'{reserve_select[0]}\n{reserve_select[1]}')) as _:
+            self.assertRaises(GameError, self.game_instance.player_select, p_id=self.p_id)
+
+        # this should not happen - attempt of buying card from top of the library (that is normally hidden)
+        with SimpleStdOutInRedirect(StringIO(f'{randint(0, 2)}\n4')) as _:
+            card, selection = self.game_instance.player_select(self.p_id)
+            self.assertRaises(GameError, self.game_instance.player_buys,
+                              card=card, desired_card=selection, p_id=self.p_id)
+
+    def test_player_reserve_selected(self):
+        """
+        test player reserving a card and then selecting again the same reserved card,
+        three times - once for each row
+        """
+        # test player reserves and selects previously reserved cards
+        # select a column based on 'chosen card [1]' and grab a card from that column for each row
+        chosen_card = randint(0, 2), randint(0, 3)
+        # for i in range(3):
+        print(chosen_card)
+        for i in range(3):
+            with SimpleStdOutInRedirect(StringIO(f"{i}\n{chosen_card[1]}")) as _:
+                card, chosen_slot = self.game_instance.player_select(p_id=0)
+                card.marker = i
+                self.assertEqual(card, self.game_instance.open_cards[i][chosen_card[1]])
+                self.game_instance.player_reserve(card, chosen_slot, p_id=0)
+                self.assertEqual(None, self.game_instance.open_cards[i][chosen_card[1]])
+            with SimpleStdOutInRedirect(StringIO(f"{i}\n5")) as _:
+                card_reserved, _ = self.game_instance.player_select(p_id=0)
+                assert hasattr(card_reserved, 'marker')
+        # raising due to overpopulation in reserved
+        self.game_instance.replace_empty()
+        with SimpleStdOutInRedirect(StringIO(f'{chosen_card[0]}\n{chosen_card[1]}')) as _:
+            players_reservations = deepcopy(self.game_instance.players[0].reserved)
+            card, chosen_slot = self.game_instance.player_select(p_id=0)
+            card.marker = 4
+            self.assertEqual(card, self.game_instance.open_cards[chosen_card[0]][chosen_card[1]])
+            # self.game_instance.player_reserve(card, chosen_slot, p_id=0)
+            self.assertRaises(GameError, self.game_instance.player_reserve, card=card, desired_card=chosen_slot, p_id=0)
+            # making sure 3-card tuple stayed the same even after raising
+            for reserved, actual in zip(players_reservations, self.game_instance.players[0].reserved):
+                self.assertEqual(reserved.marker, actual.marker)
+                self.assertNotEqual(4, actual.marker)
 
 
 if __name__ == '__main__':

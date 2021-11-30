@@ -1,7 +1,8 @@
 import re
 import ast
+from contextlib import suppress
 from random import randint
-from typing import Union
+from typing import Union, List, Tuple, Optional
 
 
 class GameError(Exception):
@@ -48,7 +49,7 @@ class Card:
         self.printing_rules = printing_rules
 
     def __str__(self):
-        # guard case
+        # simplifying case
         if not self.printing_rules:
             return str([self.gem, self.level, self.value, self.cost])
         p = f' {self.value if self.value > 0 else " "} '
@@ -66,6 +67,21 @@ class Card:
             f"║          %s sap ║\n" % (f' {self.cost[4]}',),
             f"╚═════════════════╝"])
 
+    def __eq__(self, other):
+        if isinstance(other, self.__class__):
+            if other is not self:
+                return [self.gem, self.level, self.value, self.cost] == \
+                       [other.gem, other.level, other.value, other.cost]
+            else:
+                return True
+        if other is None:
+            return False
+        raise NotImplementedError(f"comparison between {other.__class__} and {self.__class__} not implemented")
+
+    @property
+    def color_id(self):
+        return self.COLOR_IDS[self.gem][1]
+
     def can_be_bought(self, other):
         """
         for simplicity, invoking counterpart method from 'Player' class
@@ -76,10 +92,6 @@ class Card:
         if isinstance(other, Player):
             return other.can_buy(self)
         raise ValueError(f"can't compare object {other.__class__} to Card meaningfully")
-
-    @property
-    def color_id(self):
-        return self.COLOR_IDS[self.gem][1]
 
     def print_short(self):
         p_r = self.printing_rules
@@ -97,7 +109,7 @@ class Player:
         self.id = p_id
         self.tokens = [0] * 6
         self.cards = []
-        self.reserved = []
+        self.reserved = (None, None, None,)
 
     @staticmethod
     def provide_position():
@@ -111,26 +123,8 @@ class Player:
                 chosen = True
                 return r, c
             except ValueError as e:
-                print("couldn't convert inputs into integer numbers, make sure you typed correct data")
-
-    @staticmethod
-    def check_selection(open_cards, deck_sizes, desired_card):
-        if not (desired_card[0] in [0, 1, 2]) or not(desired_card[1] in [0, 1, 2, 3, 4]):
-            raise GameError("selection doesn't match any of the available positions")
-        if desired_card[1] < 4:
-            if open_cards[desired_card[0]][desired_card[1]] is None:
-                raise GameError("there is no card at given position")
-        if desired_card[1] == 4:
-            # check tops of the given row's deck
-            if desired_card[0] == 0:
-                if deck_sizes[0] == 0:
-                    raise GameError("no card in the L1 deck")
-            if desired_card[0] == 1:
-                if deck_sizes[1] == 0:
-                    raise GameError("no card in the L2 deck")
-            if desired_card[0] == 2:
-                if deck_sizes[2] == 0:
-                    raise GameError("no card in the L3 deck")
+                print("couldn't convert inputs into integer numbers, "
+                      "try again and make sure you typed correct data")
 
     @property
     def buying_power(self):
@@ -148,7 +142,32 @@ class Player:
                 power[card.color_id] += 1
         return power
 
-    def can_buy(self, other: Card):
+    def check_selection(self, open_cards: List[List[Card]], deck_sizes: List[int], desired_card: tuple):
+        if not (desired_card[0] in [0, 1, 2]) or not(desired_card[1] in [0, 1, 2, 3, 4, 5]):
+            raise GameError("selection doesn't match any of the available positions")
+        if desired_card[1] < 4:
+            if open_cards[desired_card[0]][desired_card[1]] is None:
+                raise GameError("there is no card at given position")
+        if desired_card[1] == 4:
+            # check tops of the given row's deck
+            if desired_card[0] == 0:
+                if deck_sizes[0] == 0:
+                    raise GameError("no card in the L1 deck")
+            if desired_card[0] == 1:
+                if deck_sizes[1] == 0:
+                    raise GameError("no card in the L2 deck")
+            if desired_card[0] == 2:
+                if deck_sizes[2] == 0:
+                    raise GameError("no card in the L3 deck")
+        if desired_card[1] == 5:
+            # check 'slot' in self.reserved
+            try:
+                if self.reserved[desired_card[0]] is None:
+                    raise GameError("no card to choose in this position")
+            except IndexError:
+                raise GameError("you haven't yet reserved a card")
+
+    def can_buy(self, other: Card) -> Tuple[bool, int]:
         """
         this is used to calculate if a player can afford to buy a specific card most of the time
         first we calculate if player has enough combined regular tokens + card equivalents
@@ -177,7 +196,7 @@ class Player:
     def get_token(self, color: int):
         self.tokens[color] += 1
 
-    def pay_tokens(self, debt, card: Card):
+    def pay_tokens(self, debt: Tuple[bool, int], card: Card):
         to_pay = [
                      min(tokens, max(cost - cs, 0)) if cost > 0 else 0
                      for tokens, cs, cost in zip(self.tokens, self.card_power, card.cost)
@@ -197,19 +216,27 @@ class Player:
             return True, paid
         return False, [0] * 6
 
-    def buy_reserve(self, desired_card: tuple):
-        if (cmp := self.can_buy(card := self.reserved[desired_card[0]]))[0]:
-            self.cards.append(self.reserved.pop(desired_card[0]))
-            paid = self.pay_tokens(cmp, card)
-            return True, paid
+    def buy_reserve(self, desired_card: int):
+        try:
+            if (cmp := self.can_buy(card := self.reserved[desired_card]))[0]:
+                self.cards.append(self.reserved[desired_card])
+                r = [c for index, c in enumerate(self.reserved) if index != desired_card] + [None]
+                self.reserved = tuple(r)
+                paid = self.pay_tokens(cmp, card)
+                return True, paid
+        except IndexError:
+            raise GameError("No card in this reserve slot! Choose another card")
         return False, [0] * 6
 
     def reserve(self, card: Card):
-        if len(self.reserved) > 2:
-            raise GameError("can't reserve more than 3 cards, buy the reserved card out to free space")
-        self.reserved += [card]
+        if None in self.reserved:
+            r = [card] + list(self.reserved[:2])
+            self.reserved = tuple(r)
+        else:
+            raise GameError("Can't reserve more than 3 cards, buy the reserved card out to free space")
+        # self.reserved += [card]
 
-    def select_card(self, open_cards, deck_sizes):
+    def select_card(self, open_cards: List[List[Card]], deck_sizes):
         desired_card = self.provide_position()
         # function call serving as guard statement
         self.check_selection(open_cards, deck_sizes, desired_card)
@@ -221,13 +248,13 @@ class Game:
         if not (1 < player_count < 5):
             raise GameError("cant start game with improper number of players")
         self.player_count = player_count
-        self.l1_deck = []
-        self.l2_deck = []
-        self.l3_deck = []
-        self.nobles = []
-        self.players = []
-        self.tokens = []
-        self.open_cards = []
+        self.l1_deck: List[Card] = []
+        self.l2_deck: List[Card] = []
+        self.l3_deck: List[Card] = []
+        self.nobles: List[Card] = []
+        self.players: List[Player] = []
+        self.tokens: List[int] = []
+        self.open_cards: List[List[Optional[Card]]] = []
 
     @staticmethod
     def load_cards(file: str = "cards.txt"):
@@ -309,6 +336,20 @@ class Game:
             return
         raise GameError("can't take tokens when player has none")
 
+    def replace_empty(self):
+        for deck, row in enumerate(self.open_cards):
+            for index, slot in enumerate(row):
+                if not slot:
+                    with suppress(IndexError):
+                        # it is ok for multiple/one of the decks to run out,
+                        # in 4-player game l1 runs out quite often
+                        if deck == 0:
+                            self.open_cards[deck][index] = self.l1_deck.pop()
+                        elif deck == 1:
+                            self.open_cards[deck][index] = self.l2_deck.pop()
+                        elif deck == 2:
+                            self.open_cards[deck][index] = self.l3_deck.pop()
+
     def player_draw_3(self, colors: Union[list, tuple], p_id: int):
         if 0 < len(colors) < 4:
             for color in colors:
@@ -337,6 +378,9 @@ class Game:
                 card = self.l2_deck[-1]
             if desired_card[0] == 2:
                 card = self.l3_deck[-1]
+        elif desired_card[1] == 5:
+            # buying from reserved cards only
+            card = self.players[p_id].reserved[desired_card[0]]
         else:
             card = self.open_cards[desired_card[0]][desired_card[1]]
         return card, desired_card
@@ -347,11 +391,16 @@ class Game:
             bought, paid = self.players[p_id].buy_card(card)
             if bought:
                 self.open_cards[desired_card[0]][desired_card[1]] = None
-        # buy from reserve
         elif desired_card[1] == 4:
-            bought, paid = self.players[p_id].buy_reserve(desired_card)
-        for color, tokens in enumerate(paid):
-            self.tokens[color] += tokens
+            raise GameError("can't buy card from the top of the library directly!")
+        # buy from reserve
+        elif desired_card[1] == 5:
+            bought, paid = self.players[p_id].buy_reserve(desired_card[0])
+        try:
+            for color, tokens in enumerate(paid):
+                self.tokens[color] += tokens
+        except UnboundLocalError:
+            raise GameError("something went wrong with buying card")
 
     def player_reserve(self, card: Card, desired_card: tuple, p_id: int):
         if desired_card[1] == 4:
