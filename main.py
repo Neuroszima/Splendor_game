@@ -74,9 +74,11 @@ class Card:
                        [other.gem, other.level, other.value, other.cost]
             else:
                 return True
-        if other is None:
+        elif isinstance(other, Player):
+            raise NotImplementedError(f"comparison between {other.__class__} and {self.__class__} not implemented")
+        elif other is None:
             return False
-        raise NotImplementedError(f"comparison between {other.__class__} and {self.__class__} not implemented")
+        raise TypeError(f"comparing {self.__class__} to {other.__class__} has no meaning in this context")
 
     @property
     def color_id(self):
@@ -86,9 +88,6 @@ class Card:
         """
         for simplicity, invoking counterpart method from 'Player' class
         """
-        # guard condition
-        if isinstance(other, Card):
-            raise NotImplementedError("comparison between cards isn't implemented yet")
         if isinstance(other, Player):
             return other.can_buy(self)
         raise ValueError(f"can't compare object {other.__class__} to Card meaningfully")
@@ -112,7 +111,7 @@ class Player:
         self.reserved = (None, None, None,)
 
     @staticmethod
-    def provide_position():
+    def provide_position() -> Tuple[int, int]:
         chosen = False
         while not chosen:
             try:
@@ -122,7 +121,7 @@ class Player:
                 c = int(card)
                 chosen = True
                 return r, c
-            except ValueError as e:
+            except ValueError:
                 print("couldn't convert inputs into integer numbers, "
                       "try again and make sure you typed correct data")
 
@@ -174,15 +173,17 @@ class Player:
         then if he has not enough, 'wild-card' tokens come to calculation, and only if this is not enough
         it returns false
         :param other: Card that one wish to buy
-        :return: True if greateor equal, or not if there's not enough resources
+        :return: True if greater or equal, or not if there's not enough resources, and the nr of wildcards
         """
-        # guard statement
+        # guard statements
         if not isinstance(other, Card):
             if isinstance(other, Player):
                 raise NotImplementedError("comparison between players isn't implemented yet")
             raise ValueError(f"can't compare object {other.__class__} to Player meaningfully")
-        # compute the difference of the player 'buy-power' against card cost, leave
-        # values only for tokens that matter, using 'gtz' lambda for that
+        if other.level == 0:
+            raise GameError("can't buy aristocrat card! Aristocrats can only be invited")
+        # compute the difference of the player 'buy-power' against card cost,
+        # leave values only for tokens that matter
         cids = Card.COLOR_IDS
         difference = [
             self.buying_power[cids[c_code][1]] - other.cost[cids[c_code][1]]
@@ -196,11 +197,13 @@ class Player:
     def get_token(self, color: int):
         self.tokens[color] += 1
 
-    def pay_tokens(self, debt: Tuple[bool, int], card: Card):
+    def pay_tokens(self, debt: Tuple[bool, int], card: Card) -> List[int]:
+        if card.level == 0:
+            raise GameError("aristocrat Card should not appear here")
         to_pay = [
                      min(tokens, max(cost - cs, 0)) if cost > 0 else 0
                      for tokens, cs, cost in zip(self.tokens, self.card_power, card.cost)
-                  ] + [debt[1]]
+                 ] + [debt[1]]
         self.tokens = [tokens - pay_amount for tokens, pay_amount in zip(self.tokens, to_pay)]
         return to_pay
 
@@ -224,23 +227,47 @@ class Player:
                 self.reserved = tuple(r)
                 paid = self.pay_tokens(cmp, card)
                 return True, paid
-        except IndexError:
-            raise GameError("No card in this reserve slot! Choose another card")
+        except ValueError as ve:
+            if self.reserved[desired_card] is None:
+                raise GameError("No card in this reserve slot! Choose another card")
+            else:
+                raise ValueError(str(ve))
         return False, [0] * 6
 
     def reserve(self, card: Card):
+        if card.level == 0:
+            raise GameError("aristocrats can't be reserved")
         if None in self.reserved:
             r = [card] + list(self.reserved[:2])
             self.reserved = tuple(r)
         else:
             raise GameError("Can't reserve more than 3 cards, buy the reserved card out to free space")
-        # self.reserved += [card]
 
-    def select_card(self, open_cards: List[List[Card]], deck_sizes):
+    def select_card(self, open_cards: List[List[Card]], deck_sizes: List[int]) -> Tuple[int, int]:
         desired_card = self.provide_position()
         # function call serving as guard statement
         self.check_selection(open_cards, deck_sizes, desired_card)
         return desired_card
+
+    def can_invite(self, card: Card):
+        if isinstance(card, Card):
+            if card.level == 0:
+                diff = [cp - cost for cp, cost in zip(self.card_power, card.cost)]
+                fulfilled_requirements = [True if d >= 0 else False for d in diff]
+                if all(fulfilled_requirements):
+                    return True
+                return False
+            raise GameError("this is not aristocrat card!")
+        elif card is None:
+            return False
+        raise TypeError("unsupported for types other than Card")
+
+    def invite(self, card: Card):
+        if self.can_invite(card):
+            print("can invite")
+            print("inviting:\n", card)
+            self.cards.append(card)
+            return card
 
 
 class Game:
@@ -417,6 +444,17 @@ class Game:
             c = card
         self.give_token(Card.COLOR_IDS['x'][1], p_id)
         return c
+
+    def player_aristocrat_inviting(self, p_id):
+        a_id = -1
+        for index, aristocrat in enumerate(self.open_cards[3]):
+            card = self.players[p_id].invite(aristocrat)
+            if card:
+                a_id = index
+                break
+        if a_id != -1:
+            self.open_cards[3][a_id] = None
+        return card
 
 
 if __name__ == '__main__':

@@ -11,13 +11,13 @@ from ast import literal_eval
 from copy import deepcopy
 from os import remove
 from io import StringIO, TextIOWrapper, FileIO
-from contextlib import suppress, AbstractContextManager
+from contextlib import suppress
 from typing import Union
 
 from main import Card, Player, Game, GameError
 
 
-class SimpleStdOutInRedirect(AbstractContextManager):
+class SimpleStdOutInRedirect:
     """
     class constructed to mock input() console sdtin interface.
     additional stdout mock is here to capture any unwanted text from "input()"'s passed arguments,
@@ -77,11 +77,14 @@ class SuppressedStdRedirect(suppress):
 class CardTest(unittest.TestCase):
     def setUp(self):
         self.all_cards = []
+        last_regular_card_ind = 90
         with open("cards.txt", "r") as card_db:
             for line in card_db:
                 if not match(r"#", line):
                     card_entry = literal_eval(line)
                     self.all_cards.append(card_entry)
+        self.regular_cards = self.all_cards[:last_regular_card_ind]
+        self.aristocrats = self.all_cards[last_regular_card_ind:]
 
     def test_init(self):
         color_codes = ['r', 'd', 'o', 'e', 's', 'x']
@@ -114,26 +117,46 @@ class CardTest(unittest.TestCase):
         self.assertRaises(ValueError, Card, format_list=rand_card2)
         self.assertRaises(ValueError, Card, format_list=rand_card3)
 
+    def test_eq(self):
+        rando_args = [123098, [1230, 125], '123']
+        rand_card = choice(self.all_cards)
+        card1 = Card(rand_card)
+        card2 = Card(rand_card)
+        rand_card2 = choice(self.all_cards)
+        while rand_card == rand_card2:
+            rand_card2 = choice(self.all_cards)
+        card3 = Card(rand_card2)
+        self.assertIs(card1, card1)
+        self.assertEqual(card1, card2)
+        self.assertNotEqual(card1, card3)
+        self.assertNotEqual(card1, None)
+        p = Player(0)
+        self.assertRaises(NotImplementedError, card3.__eq__, p)
+        for randarg in rando_args:
+            self.assertRaises(TypeError, card1.__eq__, randarg)
+
     def test_can_be_bought(self):
-        card = Card(choice(self.all_cards))
-        card2 = Card(choice(self.all_cards))
+        card = Card(choice(self.regular_cards))
+        card2 = Card(choice(self.regular_cards))
         # cls_list = [int, tuple, list]
         class_list = [randint(0, 182893), tuple([randint(0, 124)]*randint(0, 7)), [2]*randint(0, 5)]
         player = Player(1)
+        # in following we are only interested in possibility of raising unwanted exceptions,
+        # not in actual result of computation, results will be calc. in Player tests
         try:
             card.can_be_bought(player)
         except Exception as e:
             raise AssertionError(
                 "method 'can_be_bought' should have been implemented, instead it fails with error: %s" % str(e))
-        try:
-            card.can_be_bought(card2)
-        except Exception as e:
-            self.assertIs(e.__class__, NotImplementedError)
+        # refactored old >= comparison remnants into ValueError
+        self.assertRaises(ValueError, card.can_be_bought, card2)
         for c in class_list:
-            try:
-                card.can_be_bought(c)
-            except Exception as e:
-                self.assertIs(e.__class__, ValueError)
+            self.assertRaises(ValueError, card.can_be_bought, c)
+        # aristocrat-specific case
+        card_ar = Card(choice(self.aristocrats))
+        self.assertRaises(GameError, card_ar.can_be_bought, other=player)
+        for c in class_list:
+            self.assertRaises(ValueError, card_ar.can_be_bought, c)
 
     def test_id_property(self):
         chois = choice(self.all_cards)
@@ -143,6 +166,9 @@ class CardTest(unittest.TestCase):
         self.assertEqual(card.color_id, c_id)
 
     def test_print(self):
+        """
+        tests the extended 'ASCII art' __str__ printing, and if it contains desired elements
+        """
         # language=regexp
         rank_match = r' R([I ]{3}) '
         # language=regexp
@@ -176,7 +202,11 @@ class PlayerTest(unittest.TestCase):
         self.chosen_cards = [Card(choice(self.all_cards[:90])) for _ in range(randint(1, 20))]
         self.pid = randint(0, 3627)
         self.player_instance = Player(p_id=self.pid)
-        self.player_instance.cards = self.chosen_cards
+        # deepcopy avoids fail after we append in any of the tests
+        # detected when adding/refactoring to include tests for aristocrats
+        self.player_instance.cards = deepcopy(self.chosen_cards)
+        self.regular_cards = self.all_cards[:90]
+        self.aristocrats = [Card(c) for c in self.all_cards[90:]]
 
     @staticmethod
     def card_power_function(cards):
@@ -221,6 +251,9 @@ class PlayerTest(unittest.TestCase):
         total_card_power = self.card_power_function(self.chosen_cards)
         for player_p, card_p in zip(self.player_instance.card_power, total_card_power):
             self.assertEqual(player_p, card_p)
+        # card power should return 0 when having aristocrats, no matter the type nor count
+        total_card_power = self.card_power_function(self.aristocrats[:randint(3, 9)])
+        self.assertEqual([0] * 6, total_card_power)
 
     def test_buying_power(self):
         total_card_power = self.card_power_function(self.chosen_cards)
@@ -234,11 +267,15 @@ class PlayerTest(unittest.TestCase):
         # overwriting original values
         self.assertIsNot(self.player_instance.tokens, self.player_instance.buying_power)
 
-    def test_greater_than(self):
+    def test_can_buy(self):
+        # preparing proper card + player instance to test for proper buy
+        # we calculate card power and buy power separately to verify
+        # the class check with a totally different independent way of obtaining result
         cp = self.card_power_function(self.chosen_cards)
+        d1, d2, d3, da = Game.dek_tiers(Game.load_cards())
+        test_card = Card(choice(d1 + d2 + d3))
         self.player_instance.tokens = [randint(0, 4) for _ in range(6)]
         bp = [c_p + t for c_p, t in zip(cp, self.player_instance.tokens)]
-        test_card = Card(choice(self.all_cards))
         # calculating value of the missing tokens for each of the token's colors individually
         difference = self.power_to_cost_difference(test_card=test_card, power=bp)
         # getting the idea if we still can buy the card when wildcards are in possession
@@ -250,6 +287,9 @@ class PlayerTest(unittest.TestCase):
         comp = self.player_instance.can_buy(test_card)
         self.assertEqual(buying, comp[0])
         self.assertEqual(debt, comp[1])
+        # prepare aristocrat sub-test, doubling on safety
+        test_ar = Card(choice(da))
+        self.assertRaises(GameError, self.player_instance.can_buy, other=test_ar)
 
     def test_get_token(self):
         c_codes = Card.COLOR_CODES
@@ -271,18 +311,20 @@ class PlayerTest(unittest.TestCase):
         self.assertEqual(1, self.player_instance.tokens[IDS[ch_c][1]])
 
     def test_pay_tokens(self):
-        # we have to first generate a card that we can buy
+        # give some currency at the beginning
         original_tokens = [randint(1, 3) for _ in range(6)]
-        self.player_instance.tokens = original_tokens
-        card = Card(choice(self.all_cards))
+        self.player_instance.tokens = deepcopy(original_tokens)
+        # we have to first generate a card that we can buy
+        card = Card(choice(self.regular_cards))
         while not (cmp := self.player_instance.can_buy(card))[0]:
-            card = Card(choice(self.all_cards))
+            card = Card(choice(self.regular_cards))
 
         # calculating what needs to be paid with actual tokens, subtracting values of cards
-        # that generate value
+        # that "generate income" virtually
         card_difference = self.power_to_cost_difference(card, self.player_instance.card_power)
         # highlighting all the terms that MATTER with respect to actual costs of the card,
         # else they become nullified, meaning we don't have to spend tokens for the cost that doesn't exist
+        # we "negate" the diff because p_to_c method subtracts cost (which can be greater) from cards incomes
         to_pay = [-d if d < 0 and cc != 0 else 0 for d, cc in zip(card_difference, card.cost)]
         # calculating negative terms - if we miss some tokens from excessive costs that we can't pay normally,
         # we still can use wildcards/gold to pay them
@@ -292,11 +334,23 @@ class PlayerTest(unittest.TestCase):
         for token_debt in missing_tokens:
             if token_debt < 0:
                 debt -= token_debt
-        # # nullifying negative terms that were used in previous step, and adding the 'wildcards' to the list
+
+        # nullifying negative terms that were used in previous step, and adding the 'wildcards' to the list
         to_pay = [cost if cost < tokens else tokens for cost, tokens in zip(to_pay, original_tokens)] + [debt]
         original_tokens = [o - tp for o, tp in zip(original_tokens, to_pay)]
         tokens_paid = self.player_instance.pay_tokens(cmp, card)
         self.assertEqual(to_pay, tokens_paid)
+        self.assertEqual(original_tokens, self.player_instance.tokens)
+
+        # setup the aristocrat case, to double on safety measures
+        original_tokens = [randint(1, 3) for _ in range(6)]
+        self.player_instance.tokens = deepcopy(original_tokens)
+        card_ar = choice(self.aristocrats)
+        with suppress(GameError):
+            cmp = self.player_instance.can_buy(card_ar)
+        with suppress(GameError, TypeError):
+            _ = self.player_instance.pay_tokens(cmp, card_ar)
+        # did tokens disappear?
         self.assertEqual(original_tokens, self.player_instance.tokens)
 
     def test_buy_card(self):
@@ -304,32 +358,42 @@ class PlayerTest(unittest.TestCase):
         this test checks entire buy procedure
         we dynamically add 'marker' to check whether the card was added, since there could be the same card
         already present in players 'library' due to test suite setUp procedure
+        additional assertion to not buy aristocrat by mistake
         :return:
         """
-        card = Card(choice(self.all_cards))
+        with self.assertRaises(GameError, msg="bought aristocrat when it shouldn't be possible"):
+            self.player_instance.buy_card(card=choice(self.aristocrats))
+        card = Card(choice(self.all_cards[:90]))
         card.marker = 1
         original_tokens = [randint(0, 2) for _ in range(6)]
         self.player_instance.tokens = original_tokens
         cmp = self.player_instance.can_buy(card)
         self.player_instance.buy_card(card)
         # search the card in players library
+        found = False
         for index, c in enumerate(self.player_instance.cards):
             if hasattr(c, 'marker'):
                 if cmp[0]:
                     print('BUY - OK')
+                    found = True
                     break
                 else:
                     raise AssertionError("found bought card when player should have had no funds "
                                          "to buy it in the first place")
-            if index == len(self.player_instance.cards)-1:
-                if cmp[0]:
-                    self.assertFalse(self.player_instance.tokens == original_tokens,
-                                     "tokens were not subtracted correctly")
-                    raise AssertionError("couldn't find marked card even though it should be bought")
-                else:
-                    print("DID NOT BUY - OK")
+        if not cmp[0]:
+            if not found:
+                print("DID NOT BUY - OK")
+            else:
+                self.assertFalse(self.player_instance.tokens == original_tokens,
+                                 "tokens were not subtracted correctly")
+                raise AssertionError("couldn't find marked card even though it should be bought")
 
     def test_reserve(self):
+        # aristocrat can't be reserved, if at any point it could have been selected
+        test_ar = choice(self.aristocrats)
+        self.assertRaises(GameError, self.player_instance.reserve, card=test_ar)
+
+        # regular card cases
         self.assertEqual((None, None, None), self.player_instance.reserved)
         test_card = self.chosen_cards[0]
         self.player_instance.reserve(test_card)
@@ -343,15 +407,64 @@ class PlayerTest(unittest.TestCase):
         self.assertEqual(3, len(self.player_instance.reserved))
 
     def test_buy_reserve(self):
+        # test regular card
         original_tokens = [5 for _ in range(6)]
-        self.player_instance.tokens = original_tokens
-        card = Card(choice(self.all_cards))
+        self.player_instance.tokens = deepcopy(original_tokens)
+        card = Card(choice(self.regular_cards))
         while not (self.player_instance.can_buy(card))[0]:
-            card = Card(choice(self.all_cards))
+            card = Card(choice(self.regular_cards))
         self.player_instance.reserve(card)
         self.player_instance.buy_reserve(0)
         self.assertIn(card, self.player_instance.cards)
         self.assertEqual((None, None, None), self.player_instance.reserved)
+        # test aristocrat
+        card_ar = choice(self.aristocrats)
+        with suppress(GameError):
+            self.player_instance.reserve(card_ar)
+        self.assertRaises(GameError, self.player_instance.buy_reserve, desired_card=0)
+
+    def test_can_invite(self):
+        """
+        aristocrat-only test
+        """
+        # resetting player cards to base empty state
+        self.player_instance.cards = []
+        card = Card(choice(self.all_cards[90:]))
+        garbage = [randint(0, 12414241), Player(randint(0, 43)), [randint(24, 425), 1]]
+        print(card)
+        for color, requirement in enumerate(card.cost):
+            if requirement:
+                for i in range(requirement):
+                    self.player_instance.cards.append(Card(
+                        [Card.COLOR_CODES[color], 1, 0, 1, 0, 0, 0, 1, 2]))
+        for c in self.player_instance.cards:
+            print(c.print_short())
+        self.assertTrue(self.player_instance.can_invite(card), "couldn't invite aristocrat that should be invitable")
+        self.player_instance.cards = []
+        self.assertFalse(self.player_instance.can_invite(card), "invitation to aristocrat that isn't correct")
+        for invalid in self.chosen_cards:
+            self.assertRaises(GameError, self.player_instance.can_invite, card=invalid)
+        for g in garbage:
+            self.assertRaises(TypeError, self.player_instance.can_invite, card=g)
+
+    def test_invite(self):
+        """
+        aristocrat-only test
+        """
+        card = Card(choice(self.all_cards[90:]))
+        # setting up the "can invite" case
+        for color, requirement in enumerate(card.cost):
+            if requirement:
+                for i in range(requirement):
+                    self.player_instance.cards.append(Card(
+                        [Card.COLOR_CODES[color], 1, 0, 1, 0, 0, 0, 1, 2]))
+        self.player_instance.invite(card)
+        self.assertIn(card, self.player_instance.cards)
+        self.player_instance.cards = []
+        self.player_instance.invite(card)
+        self.assertNotIn(card, self.player_instance.cards)
+        for invalid_c in self.chosen_cards:
+            self.assertRaises(GameError, self.player_instance.invite, card=invalid_c)
 
     def test_provide_position(self):
         with SimpleStdOutInRedirect(StringIO(" \n ")) as _:
@@ -403,32 +516,11 @@ class GameTest(unittest.TestCase):
         elif self.num_of_players == 4:
             other_tokens = 7
         tokens_total = [other_tokens, other_tokens, other_tokens, other_tokens, other_tokens, wildcard_tokens]
-        # print(self.game_instance.tokens)
-        # print(self.num_of_players)
-        # print(tokens_total)
         self.assertEqual(tokens_total, self.game_instance.tokens)
 
     def test_setup_players(self):
         player_ids = [_ for _ in range(self.num_of_players)]
         self.assertEqual(player_ids, [player.id for player in self.game_instance.players])
-
-    def test_give_token(self):
-        player_copy: Player
-        color = choice(Card.COLOR_CODES)
-        color_id = Card.COLOR_IDS[color][1]
-        player_id = choice([i for i in range(self.num_of_players)])
-        player_copy = deepcopy(self.game_instance.players[player_id])
-        tokens_state = deepcopy(self.game_instance.tokens)
-        self.assertEqual(player_id, player_copy.id)
-        player_copy.tokens[color_id] += 1
-        tokens_state[color_id] -= 1
-        self.game_instance.give_token(color_id, player_id)
-        self.assertEqual(player_copy.tokens, self.game_instance.players[player_id].tokens)
-        self.assertEqual(tokens_state, self.game_instance.tokens)
-        test_game = Game(randint(2, 4))
-        # can't generate tokens out of thin air
-        test_game.tokens = [0 for _ in range(6)]
-        self.assertRaises(GameError, test_game.give_token, color=color_id, p_id=player_id)
 
     def test_card_reading(self):
         test_game = Game(randint(2, 4))
@@ -463,6 +555,10 @@ class GameTest(unittest.TestCase):
         self.assertEqual(dek_2, d2)
         self.assertEqual(dek_3, d3)
         self.assertEqual(dek_aristocrates, da)
+        # ensuring levels of every type in decks
+        for c_level, dek in enumerate([da, d1, d2, d3]):
+            for c in dek:
+                self.assertEqual(c_level, c[3])
 
     def test_cards_out(self):
         cards = self.game_instance.load_cards()
@@ -501,12 +597,30 @@ class GameTest(unittest.TestCase):
             self.game_instance.l3_deck.pop()
         self.assertEqual(poped_vals, self.game_instance.deck_sizes)
 
+    def test_give_token(self):
+        color = choice(Card.COLOR_CODES)
+        color_id = Card.COLOR_IDS[color][1]
+        player_id = choice([i for i in range(self.num_of_players)])
+        player_copy = deepcopy(self.game_instance.players[player_id])
+        tokens_state = deepcopy(self.game_instance.tokens)
+        self.assertEqual(player_id, player_copy.id)
+        player_copy.tokens[color_id] += 1
+        tokens_state[color_id] -= 1
+        self.game_instance.give_token(color_id, player_id)
+        self.assertEqual(player_copy.tokens, self.game_instance.players[player_id].tokens)
+        self.assertEqual(tokens_state, self.game_instance.tokens)
+        test_game = Game(randint(2, 4))
+        # can't generate tokens out of thin air
+        test_game.tokens = [0 for _ in range(6)]
+        self.assertRaises(GameError, test_game.give_token, color=color_id, p_id=player_id)
+
     def test_card_replace(self):
         # clean game - no reason to substitute cards when nothing has been taken/reserved
         opencard_dmp = deepcopy(self.game_instance.open_cards)
         self.game_instance.replace_empty()
         for row, post_replace_row in zip(opencard_dmp, self.game_instance.open_cards):
             self.assertEqual(row, post_replace_row)
+
         # substitution process
         first_row = randint(0, 3)
         second_row = randint(0, 3)
@@ -521,12 +635,14 @@ class GameTest(unittest.TestCase):
         self.game_instance.open_cards[1][second_row] = None
         self.game_instance.open_cards[2][third_row] = None
         self.game_instance.replace_empty()
+
         # all empty spots get replaced
         for row in self.game_instance.open_cards:
             self.assertNotIn(None, row)
         assert hasattr(self.game_instance.open_cards[0][first_row], 'marker')
         assert hasattr(self.game_instance.open_cards[1][second_row], 'marker')
         assert hasattr(self.game_instance.open_cards[2][third_row], 'marker')
+
         # attempt to force raise (that should be ignored) at empty libraries,
         # it is not mistake to allow continuing, when decks are empty
         self.game_instance.open_cards[0][first_row] = None
@@ -539,7 +655,7 @@ class GameTest(unittest.TestCase):
         try:
             self.game_instance.replace_empty()
         except IndexError:
-            raise AssertionError("empty libraries should not throw an error")
+            raise AssertionError("empty libraries should not raise an error")
         # the state of the game should be unaltered
         for row, post_replace_row in zip(opencard_dmp, self.game_instance.open_cards):
             self.assertEqual(row, post_replace_row)
@@ -557,6 +673,7 @@ class GameTest(unittest.TestCase):
         chosen2 = chosen[:2]
         print(chosen2, self.game_instance.players[0].tokens)
         before = deepcopy(self.game_instance.players[0].tokens)
+
         # drawing 3 from 3 colors
         self.game_instance.player_draw_3(chosen, 0)
         after = deepcopy(before)
@@ -567,12 +684,14 @@ class GameTest(unittest.TestCase):
         before = deepcopy(after)
         for c in chosen2:
             after[c] += 1
+
         # drawing 3 with 2 color choice
         self.game_instance.player_draw_3(chosen2, 0)
         self.assertNotEqual(before, self.game_instance.players[0].tokens)
         self.assertEqual(after, self.game_instance.players[0].tokens)
         self.assertEqual(after, self.game_instance.players[0].tokens)
-        # try throwing exception when no tokens on stack for one of the colors, after reset
+
+        # try raiseing exception when no tokens on stack for one of the colors, after reset
         self.game_instance.full_setup()
         self.game_instance.tokens[chosen[0]] = 0
         self.assertRaises(GameError, self.game_instance.player_draw_3, colors=chosen, p_id=0)
@@ -590,6 +709,57 @@ class GameTest(unittest.TestCase):
         for i in range(3):
             self.game_instance.tokens[chosen] = i
             self.assertRaises(GameError, self.game_instance.player_draw_2_same, color=chosen, p_id=0)
+
+    def test_player_aristocrat_inviting(self):
+        """
+        testing proper procedure of 'inviting' aristocrat cards, according to game rules
+        only one aristocrat per turn can be invited, resetting to test multiple cases
+        """
+        # choose player and card
+        p_id = randint(0, self.num_of_players-1)
+        shuffle(self.game_instance.open_cards[3])
+        card_ar = self.game_instance.open_cards[3][0]
+
+        # mock cards corresponding to chosen 'persona', costs/levels and other stats don't matter
+        for color_id, c in enumerate(card_ar.cost):
+            if c:
+                cards = [Card([Card.COLOR_CODES[color_id]] + [1]*8) for _ in range(c)]
+                self.game_instance.players[p_id].cards += cards
+
+        for card in self.game_instance.players[p_id].cards:
+            print(card.print_short())
+        # invitation, has to succeed
+        self.game_instance.player_aristocrat_inviting(p_id=p_id)
+        self.assertIn(card_ar, self.game_instance.players[p_id].cards)
+        self.assertIn(None, self.game_instance.open_cards[3])
+
+        # max requirement for the arist. invitation is 4 -> putting this in 'range()'
+        # aristocrats don't demand other aristocrats thus limiting colors to [:5] only
+        self.game_instance.full_setup()
+
+        # empty player card pool, inviting shouldn't affect anything
+        cards_before = len(self.game_instance.players[p_id].cards)
+        self.game_instance.player_aristocrat_inviting(p_id=p_id)
+        count = sum([1 if ar is None else 0 for ar in self.game_instance.open_cards[3]])
+        self.assertEqual(0, count)
+        self.assertEqual(cards_before, len(self.game_instance.players[p_id].cards))
+
+        # generating cards to invite aristocrat, and inviting for the first time
+        for color_code in Card.COLOR_CODES[:5]:
+            cards = [Card([color_code] + [1] * 8) for _ in range(4)]
+            self.game_instance.players[p_id].cards += cards
+        cards_before = len(self.game_instance.players[p_id].cards)
+        self.game_instance.player_aristocrat_inviting(p_id=p_id)
+        count = sum([1 if ar is None else 0 for ar in self.game_instance.open_cards[3]])
+        self.assertEqual(1, count)
+        self.assertEqual(cards_before+1, len(self.game_instance.players[p_id].cards))
+
+        # trying to invite again as in "next turn" - now we have "None" in list
+        cards_before = len(self.game_instance.players[p_id].cards)
+        self.game_instance.player_aristocrat_inviting(p_id=p_id)
+        count = sum([1 if ar is None else 0 for ar in self.game_instance.open_cards[3]])
+        self.assertEqual(2, count)
+        self.assertEqual(cards_before+1, len(self.game_instance.players[p_id].cards))
 
 
 class CrossClassTests(unittest.TestCase):
@@ -633,7 +803,6 @@ class CrossClassTests(unittest.TestCase):
         """
         making sure number of tokens stay the same no matter what we attempt to do with giving/taking
         tokens from the players, raising ValueErrors when needed
-        :return:
         """
         for playernum, tokens in zip([2, 3, 4], [4, 5, 7]):
             test_game = Game(playernum)
@@ -671,6 +840,7 @@ class CrossClassTests(unittest.TestCase):
         # improper value
         select4 = randint(3, 120), randint(6, 10247)
         p: Player = self.game_instance.players[0]
+
         try:
             p.check_selection(open_cards, deck_sizes, desired_card=select1)
         except GameError:
@@ -679,14 +849,15 @@ class CrossClassTests(unittest.TestCase):
             p.check_selection(open_cards, deck_sizes, desired_card=select2)
         except GameError:
             raise AssertionError("this selection should be correct but it failed")
+
         # mock player reserving card
         p.reserved = tuple([self.game_instance.open_cards[i][select1[1]] for i in range(3)])
         try:
             p.check_selection(open_cards, deck_sizes, desired_card=select3)
         except GameError:
             raise AssertionError("this selection should be correct but it failed")
-        # self.assertIs(self.game_instance.open_cards[select3[0]][select1[1]], )
-        # modifying deck statuses to throw
+
+        # modifying deck statuses to raise
         self.game_instance.open_cards[select1[0]][select1[1]] = None
         if select2[0] == 0:
             self.game_instance.l1_deck = []
@@ -694,13 +865,15 @@ class CrossClassTests(unittest.TestCase):
             self.game_instance.l2_deck = []
         if select2[0] == 2:
             self.game_instance.l3_deck = []
+
         # refreshing deck sizes
         deck_sizes = self.game_instance.deck_sizes
         self.assertRaises(GameError, p.check_selection, self.game_instance.open_cards, deck_sizes, select1)
         self.assertRaises(GameError, p.check_selection, self.game_instance.open_cards, deck_sizes, select2)
         self.assertRaises(GameError, p.check_selection, self.game_instance.open_cards, deck_sizes, select4)
-        # modifying player hand to throw
-        p.reserved = []
+
+        # modifying player hand to raise
+        p.reserved = []  # this isn't really correct state but it still should work
         self.assertRaises(GameError, p.check_selection, self.game_instance.open_cards, deck_sizes, select3)
         p.reserved = [None] * 3
         self.assertRaises(GameError, p.check_selection, self.game_instance.open_cards, deck_sizes, select3)
@@ -832,6 +1005,7 @@ class CrossClassTests(unittest.TestCase):
             self.assertIn(card, self.game_instance.players[self.p_id].reserved)
             card, position = self.game_instance.player_select(self.p_id)
             self.game_instance.player_buys(card, position, self.p_id)
+        print('buy selected')
         print(card)
         print(self.game_instance.players[self.p_id].cards[0])
         print(self.game_instance.players[self.p_id].tokens)
@@ -858,8 +1032,7 @@ class CrossClassTests(unittest.TestCase):
         # test player reserves and selects previously reserved cards
         # select a column based on 'chosen card [1]' and grab a card from that column for each row
         chosen_card = randint(0, 2), randint(0, 3)
-        # for i in range(3):
-        print(chosen_card)
+        print('reserve', chosen_card)
         for i in range(3):
             with SimpleStdOutInRedirect(StringIO(f"{i}\n{chosen_card[1]}")) as _:
                 card, chosen_slot = self.game_instance.player_select(p_id=0)
@@ -877,7 +1050,6 @@ class CrossClassTests(unittest.TestCase):
             card, chosen_slot = self.game_instance.player_select(p_id=0)
             card.marker = 4
             self.assertEqual(card, self.game_instance.open_cards[chosen_card[0]][chosen_card[1]])
-            # self.game_instance.player_reserve(card, chosen_slot, p_id=0)
             self.assertRaises(GameError, self.game_instance.player_reserve, card=card, desired_card=chosen_slot, p_id=0)
             # making sure 3-card tuple stayed the same even after raising
             for reserved, actual in zip(players_reservations, self.game_instance.players[0].reserved):
